@@ -1,0 +1,136 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Trusted RBAC lookup: admins collection is only writable via Admin SDK / Firebase Console
+    function isAdmin() {
+      return isVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Admins registry: never writable by clients
+    match /admins/{adminId} {
+      allow get: if isOwner(adminId) || isAdmin();
+      allow list, write: if false;
+    }
+
+    // Users collection: strict PII isolation and role immutability
+    function isValidUserCreate(data, userId) {
+      return data.keys().hasAll(['uid', 'fullName', 'email', 'role', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'fullName', 'email', 'role', 'suspended', 'phone', 'bio', 'photoURL', 'createdAt', 'updatedAt'])
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && data.role == 'student'
+        && (!('suspended' in data) || data.suspended == false)
+        && data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 120
+        && data.email is string && data.email.size() <= 254;
+    }
+
+    function isValidUserUpdate(data) {
+      return data.uid == existing().uid
+        && data.role == existing().role
+        && data.email == existing().email
+        && data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 120;
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(userId) && isOwner(userId) && isValidUserCreate(incoming(), userId);
+      allow update: if isValidId(userId) && (
+        isAdmin() ||
+        (isOwner(userId) && isValidUserUpdate(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'phone', 'bio', 'photoURL', 'updatedAt']))
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Public catalog read for published courses; admin-only writes
+    match /courses/{courseId} {
+      allow get: if isValidId(courseId) && (existing().published == true || isAdmin());
+      allow list: if resource.data.published == true || isAdmin();
+      allow write: if isValidId(courseId) && isAdmin();
+    }
+
+    // Modules readable for published courses; admin-only writes
+    match /modules/{moduleId} {
+      allow get, list: if isSignedIn() || isAdmin();
+      allow write: if isValidId(moduleId) && isAdmin();
+    }
+
+    // Lessons contain video/resource references: only enrolled students or admins may read
+    match /lessons/{lessonId} {
+      allow get, list: if isAdmin() || (
+        isSignedIn() && exists(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_course_' + resource.data.courseId))
+      );
+      allow write: if isValidId(lessonId) && isAdmin();
+    }
+
+    // Ebooks catalog: published metadata readable; admin-only writes
+    match /ebooks/{ebookId} {
+      allow get: if isValidId(ebookId) && (existing().published == true || isAdmin());
+      allow list: if resource.data.published == true || isAdmin();
+      allow write: if isValidId(ebookId) && isAdmin();
+    }
+
+    // Orders: users can read their own orders; only server (Admin SDK) creates PAID orders or updates payment statuses
+    match /orders/{orderId} {
+      allow get: if isValidId(orderId) && (isAdmin() || (isSignedIn() && existing().userId == request.auth.uid));
+      allow list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isValidId(orderId) && isVerified()
+        && incoming().userId == request.auth.uid
+        && incoming().status == 'PENDING';
+      allow update, delete: if isAdmin();
+    }
+
+    // Enrollments: only server/admin grants enrollments; users can update their own lesson progress only
+    match /enrollments/{enrollmentId} {
+      allow get: if isValidId(enrollmentId) && (isAdmin() || (isSignedIn() && existing().userId == request.auth.uid));
+      allow list: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create, delete: if isAdmin();
+      allow update: if isValidId(enrollmentId) && (
+        isAdmin() ||
+        (isSignedIn() && existing().userId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['completedLessonIds', 'lastAccessedLessonId', 'lastAccessedAt']))
+      );
+    }
+
+    // Announcements: active announcements are public; admin-only writes
+    match /announcements/{announcementId} {
+      allow get: if isValidId(announcementId) && (existing().active == true || isAdmin());
+      allow list: if resource.data.active == true || isAdmin();
+      allow write: if isValidId(announcementId) && isAdmin();
+    }
+
+    // Site settings: public read; admin-only write
+    match /siteSettings/{settingId} {
+      allow get, list: if true;
+      allow write: if isValidId(settingId) && isAdmin();
+    }
+  }
+}

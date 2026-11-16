@@ -1,0 +1,44 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && firestore.exists(/databases/(default)/documents/admins/$(request.auth.uid));
+    }
+
+    // Public marketing assets (course thumbnails, ebook covers, custom site logo)
+    match /public/{allPaths=**} {
+      allow read: if true;
+      allow write: if isAdmin()
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // Private course videos and downloadable resources: never publicly readable
+    // Downloads are served via verified backend signed URLs or authorized enrollment check
+    match /private/courses/{courseId}/{allPaths=**} {
+      allow read: if isAdmin() || (
+        isSignedIn()
+        && firestore.exists(/databases/(default)/documents/enrollments/$(request.auth.uid + '_course_' + courseId))
+      );
+      allow write: if isAdmin()
+        && request.resource.size < 500 * 1024 * 1024;
+    }
+
+    // Private ebook PDFs: only accessible after verified purchase
+    match /private/ebooks/{ebookId}/{allPaths=**} {
+      allow read: if isAdmin() || (
+        isSignedIn()
+        && firestore.exists(/databases/(default)/documents/enrollments/$(request.auth.uid + '_ebook_' + ebookId))
+      );
+      allow write: if isAdmin()
+        && request.resource.size < 100 * 1024 * 1024
+        && request.resource.contentType == 'application/pdf';
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "TITAN CREATIVE HUB ™",
+  "description": "Premium digital learning and ecommerce platform offering executive courses, video mastery lessons, and curated digital ebooks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
